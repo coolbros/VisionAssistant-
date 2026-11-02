@@ -16,6 +16,9 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
+        ndk {
+            abiFilters.add("arm64-v8a")
+        }
     }
 
     buildTypes {
@@ -45,10 +48,24 @@ android {
 
     defaultConfig {
         buildConfigField("String", "GEMINI_API_KEY", geminiApiKey)
+        externalNativeBuild {
+            cmake {
+                cppFlags += "-std=c++17"
+            }
+        }
     }
 
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
 
     packaging {
+      jniLibs {
+        useLegacyPackaging = true
+      }
       resources {
         excludes += "/META-INF/{AL2.0,LGPL2.1}"
       }

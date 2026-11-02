@@ -139,7 +139,10 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
             tts?.language = Locale.US
-            tts?.let { viewModel.setTts(it) }
+            tts?.let { 
+                viewModel.setTts(it)
+                viewModel.initLocalEngine(applicationContext) 
+            }
         }
     }
 

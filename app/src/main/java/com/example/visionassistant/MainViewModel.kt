@@ -37,7 +37,9 @@ class MainViewModel : ViewModel() {
     private val _taskState = MutableStateFlow(TaskState())
     val taskState: StateFlow<TaskState> = _taskState.asStateFlow()
 
-    private val visionModel: VisionModel = CloudVisionModel(BuildConfig.GEMINI_API_KEY)
+    private val cloudVisionModel: VisionModel = CloudVisionModel(BuildConfig.GEMINI_API_KEY)
+    private var localVisionEngine: VisionModel? = null
+    
     private val json = Json { ignoreUnknownKeys = true }
     
     private var tts: TextToSpeech? = null
@@ -59,6 +61,12 @@ class MainViewModel : ViewModel() {
 
     // Latency Tracking (FIND)
     var findIterationStartTime: Long = 0
+
+    fun initLocalEngine(context: android.content.Context) {
+        if (localVisionEngine == null) {
+            localVisionEngine = LocalVisionEngine(context)
+        }
+    }
 
     fun setTts(textToSpeech: TextToSpeech) {
         tts = textToSpeech
@@ -137,7 +145,14 @@ class MainViewModel : ViewModel() {
             val currentState = _taskState.value.copy(retryCount = Math.max(readRetryCount, findRetryCount))
             
             val requestStartTime = System.currentTimeMillis()
-            val decision = visionModel.analyze(
+            
+            val engineToUse = if (currentMode == TaskMode.FIND && localVisionEngine != null) {
+                localVisionEngine!!
+            } else {
+                cloudVisionModel
+            }
+            
+            val decision = engineToUse.analyze(
                 image = bitmap,
                 state = currentState
             )
@@ -163,53 +178,74 @@ class MainViewModel : ViewModel() {
                 }
             } else if (currentMode == TaskMode.FIND) {
                 val decisionCompleteStart = System.currentTimeMillis()
-                val findResult = try { json.decodeFromString<FindResult>(decision.debugData) } catch(e: Exception) { null }
                 
-                if (findResult == null || decision.speech.startsWith("I encountered")) {
-                    speechToSay = "I encountered an error trying to find that."
-                } else {
-                    if (findResult.target_visible) {
-                        val centerX = findResult.center_x
-                        val centerY = findResult.center_y
-                        val area = findResult.width * findResult.height
-                        
-                        val isCenteredX = centerX in 0.35..0.65
-                        val isCenteredY = centerY in 0.35..0.65
-                        val isLargeEnough = area >= 0.08
-                        
-                        if (isCenteredX && isCenteredY && isLargeEnough && findResult.confidence > 0.5) {
-                            speechToSay = "Found your ${currentState.findTarget}."
-                            findRetryCount = 0
+                if (decision.action != FastPolicyAction.NONE) {
+                    // Local Engine
+                    speechToSay = decision.speech
+                    if (decision.taskComplete) {
+                        findRetryCount = 0
+                        willRetry = false
+                    } else {
+                        if (findRetryCount < maxFindRetries) {
+                            findRetryCount++
+                            utteranceId = "FIND_RETRY"
+                            willRetry = true
+                            if (decision.action == FastPolicyAction.REACQUIRE) {
+                                speechToSay = if (findRetryCount % 3 == 0) "Searching." else ""
+                            }
                         } else {
-                            // Local deterministic policy
-                            if (centerX < 0.35) speechToSay = "Move left."
-                            else if (centerX > 0.65) speechToSay = "Move right."
-                            else if (centerY < 0.35) speechToSay = "Move up."
-                            else if (centerY > 0.65) speechToSay = "Move down."
-                            else speechToSay = "Move closer."
+                            findRetryCount = 0
+                            speechToSay = "I couldn't find it. Try moving the camera."
+                            willRetry = false
+                        }
+                    }
+                } else {
+                    // Cloud fallback JSON logic
+                    val findResult = try { json.decodeFromString<FindResult>(decision.debugData) } catch(e: Exception) { null }
+                    
+                    if (findResult == null || decision.speech.startsWith("I encountered")) {
+                        speechToSay = "I encountered an error trying to find that."
+                    } else {
+                        if (findResult.target_visible) {
+                            val centerX = findResult.center_x
+                            val centerY = findResult.center_y
+                            val area = findResult.width * findResult.height
                             
+                            val isCenteredX = centerX in 0.35..0.65
+                            val isCenteredY = centerY in 0.35..0.65
+                            val isLargeEnough = area >= 0.08
+                            
+                            if (isCenteredX && isCenteredY && isLargeEnough && findResult.confidence > 0.5) {
+                                speechToSay = "Found your ${currentState.findTarget}."
+                                findRetryCount = 0
+                            } else {
+                                if (centerX < 0.35) speechToSay = "Move left."
+                                else if (centerX > 0.65) speechToSay = "Move right."
+                                else if (centerY < 0.35) speechToSay = "Move up."
+                                else if (centerY > 0.65) speechToSay = "Move down."
+                                else speechToSay = "Move closer."
+                                
+                                if (findRetryCount < maxFindRetries) {
+                                    findRetryCount++
+                                    utteranceId = "FIND_RETRY"
+                                    willRetry = true
+                                } else {
+                                    findRetryCount = 0
+                                    speechToSay = "I couldn't find it. Try moving the camera."
+                                    willRetry = false
+                                }
+                            }
+                        } else {
                             if (findRetryCount < maxFindRetries) {
                                 findRetryCount++
                                 utteranceId = "FIND_RETRY"
                                 willRetry = true
+                                speechToSay = if (findRetryCount % 3 == 0) "Searching." else ""
                             } else {
                                 findRetryCount = 0
                                 speechToSay = "I couldn't find it. Try moving the camera."
                                 willRetry = false
                             }
-                        }
-                    } else {
-                        // Bounded search strategy
-                        if (findRetryCount < maxFindRetries) {
-                            findRetryCount++
-                            utteranceId = "FIND_RETRY"
-                            willRetry = true
-                            // Speak only occasional search hints
-                            speechToSay = if (findRetryCount % 3 == 0) "Searching." else ""
-                        } else {
-                            findRetryCount = 0
-                            speechToSay = "I couldn't find it. Try moving the camera."
-                            willRetry = false
                         }
                     }
                 }
